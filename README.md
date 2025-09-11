@@ -1,4 +1,4 @@
-# PatchPilot — Coding Buddy (Balanced Profile)
+# Coding Buddy 
 
 Local, voice-aware coding buddy that listens for developer intents, proposes minimal code patches, and explains the “why” in a few concise bullets. This document outlines the **planned architecture, libraries, and models**.
 
