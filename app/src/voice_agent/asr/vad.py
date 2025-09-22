@@ -1,4 +1,3 @@
-# src/asr/vad.py
 from typing import List, Optional
 from collections import deque
 import numpy as np
