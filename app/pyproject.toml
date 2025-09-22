@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-agent"
+version = "0.1.0"
+requires-python = ">=3.9"
+description = "Voice Agent (ASR first) using faster-whisper"
+dependencies = [
+  "faster-whisper",
+  "sounddevice",
+  "numpy",
+  "pynput",
+  "pyperclip",
+  "rich"
+]
+
+[project.scripts]
+va     = "voice_agent.cli:main"
+va-asr = "voice_agent.asr.app:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["voice_agent*"]

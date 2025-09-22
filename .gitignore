@@ -1,0 +1,51 @@
+# --- Python bytecode / caches ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# --- Build artifacts ---
+build/
+dist/
+*.egg
+*.egg-info/
+*.dist-info/
+pip-wheel-metadata/
+
+# project-specific egg-info names (cover both underscore & dash)
+voice_agent.egg-info/
+voice-agent-egg-info/
+src/voice_agent.egg-info/
+src/*/.egg-info/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- IDE / OS cruft ---
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# --- Logs / runs / temp ---
+logs/
+runs/
+*.log
+*.jsonl
+tmp/
+temp/
+
+# --- Data & models (optional; un-ignore if you commit samples) ---
+data/**/*.wav
+data/**/*.mp3
+data/**/*.m4a
+models/
+.cache/
+huggingface/
+
+# --- Notebooks ---
+*.ipynb_checkpoints/
