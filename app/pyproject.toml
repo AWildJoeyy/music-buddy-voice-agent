@@ -18,7 +18,7 @@ dependencies = [
 
 [project.scripts]
 va     = "voice_agent.cli:main"
-va-asr = "voice_agent.asr.app:main"
+va-asr = "voice_agent.asr.asr_app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

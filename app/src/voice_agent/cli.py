@@ -2,12 +2,12 @@ import argparse
 import sys
 import sounddevice as sd
 
-from voice_agent.asr.app import main as asr_main
+from voice_agent.asr.asr_app import main as asr_main
 from voice_agent.asr.backend_whisper import WhisperBackend
 
 
 def _forward_to_asr(args: argparse.Namespace):
-    """Forward parsed args to asr.app:main so the parsing logic lives in one place."""
+    """Forward parsed args to asr.asr_app:main so the parsing logic lives in one place."""
     argv = ["va-asr"]
     for k, v in vars(args).items():
         if k == "cmd":

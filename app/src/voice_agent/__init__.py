@@ -1,5 +1,5 @@
 __all__ = [
-    "app",
+    "asr_app",
     "capture",
     "vad",
     "backend_whisper",
