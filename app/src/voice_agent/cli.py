@@ -34,6 +34,7 @@ def main():
     a.add_argument("--compute-type", default="auto")
     a.add_argument("--lang", default="en")
     a.add_argument("--beam-size", type=int, default=5)
+    a.add_argument("--gain-db", type=float, default=0.0)
 
     a.add_argument("--frame-ms", type=int, default=20, choices=[10, 20, 30])
     a.add_argument("--silence-tail-ms", type=int, default=400)

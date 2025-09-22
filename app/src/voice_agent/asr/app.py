@@ -1,6 +1,6 @@
-# src/asr/app.py
 import argparse
 import json
+import math
 import queue
 import time
 from typing import Optional, List
@@ -16,7 +16,6 @@ from .sinks import ConsoleSink, ClipboardSink, JSONLSink, CompositeSink, Transcr
 
 console = Console()
 
-
 class AppState:
     def __init__(self, copy_clip: bool = True):
         self.running: bool = True
@@ -24,7 +23,6 @@ class AppState:
         self.ptt_active: bool = False     # F10 push-to-talk (hold)
         self.copy_clip: bool = copy_clip
         self.ptt_buf: List[bytes] = []    # frames collected while holding F10
-
 
 def build_sinks(jsonl_path: Optional[str], copy_clip: bool) -> CompositeSink:
     sinks = [ConsoleSink(printer=lambda s: console.print(f"[bold]{s}[/bold]"))]
@@ -34,9 +32,7 @@ def build_sinks(jsonl_path: Optional[str], copy_clip: bool) -> CompositeSink:
         sinks.append(JSONLSink(jsonl_path))
     return CompositeSink(sinks)
 
-
 def log_event(kind: str, payload: dict, path: Optional[str]) -> None:
-    """Append a tiny JSON record for debugging / future Notion sync."""
     if not path:
         return
     rec = {"ts": time.time(), "kind": kind, **payload}
@@ -45,7 +41,6 @@ def log_event(kind: str, payload: dict, path: Optional[str]) -> None:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass
-
 
 def main():
     p = argparse.ArgumentParser(description="Always-on ASR (faster-whisper + energy VAD)")
@@ -57,7 +52,7 @@ def main():
     p.add_argument("--lang", default="en", help="Language hint (e.g., en)")
     p.add_argument("--beam-size", type=int, default=5)
 
-    # VAD / endpointing (pure Python, no native deps)
+    # VAD / endpointing
     p.add_argument("--frame-ms", type=int, default=20, choices=[10, 20, 30])
     p.add_argument("--silence-tail-ms", type=int, default=400)
     p.add_argument("--rms-floor", type=float, default=60.0)
@@ -71,12 +66,13 @@ def main():
     p.add_argument("--jsonl", default=None, help="Path to append transcripts as JSONL")
     p.add_argument("--no-clip", action="store_true", help="Disable copying transcript to clipboard")
 
+    p.add_argument("--gain-db", type=float, default=0.0, help="Input preamp in dB (e.g., 6 = ~2x)")
+
     args = p.parse_args()
 
     state = AppState(copy_clip=(not args.no_clip))
     sinks = build_sinks(args.jsonl, state.copy_clip)
 
-    # Backend (auto-fallback to CPU int8 inside WhisperBackend if CUDA/cuDNN is missing)
     backend = WhisperBackend(
         model_name=args.model,
         device=args.device_type,
@@ -86,7 +82,6 @@ def main():
         vad_filter=True,
     )
 
-    # Energy-based VAD (warmup + pre-roll to avoid chopping first words)
     vad = VADSegmenter(
         frame_ms=args.frame_ms,
         silence_tail_ms=args.silence_tail_ms,
@@ -97,6 +92,8 @@ def main():
         pre_roll_ms=args.pre_roll_ms,
         min_utter_ms=args.min_utter_ms,
     )
+    
+    preamp_gain = 10.0 ** (args.gain_db / 20.0)
 
     q_utter: queue.Queue[bytes] = queue.Queue()
 
@@ -104,21 +101,27 @@ def main():
         console.log(f"[yellow]Audio status[/yellow]: {msg}")
 
     def on_frame(pcm: bytes):
-        # Collect frames during push-to-talk
         if state.ptt_active:
             state.ptt_buf.append(pcm)
             return
-
-        # Normal continuous listening
         if state.listening:
             utter = vad.push(pcm)
             if utter:
                 q_utter.put(utter)
 
-    mic = MicStream(frame_ms=args.frame_ms, device=args.device, on_status=on_status)
+    mic = MicStream(
+        frame_ms=args.frame_ms,
+        device=args.device,
+        on_status=on_status,
+        preamp_gain=preamp_gain,
+    )
     mic.start(on_frame)
 
-    # Hotkeys
+    # Hotkeys (F4/F5 adjust preamp gain; F9/F10/Esc/F8 are as before)
+    def _print_gain():
+        db = 20.0 * math.log10(mic.preamp_gain) if mic.preamp_gain > 0 else -120.0
+        console.print(f"[yellow]Preamp:[/yellow] {db:.1f} dB  (x{mic.preamp_gain:.2f})")
+
     def on_press(key):
         if key == keyboard.Key.f10:
             state.ptt_active = True
@@ -136,6 +139,12 @@ def main():
                 utter = vad.flush()
                 if utter:
                     q_utter.put(utter)
+        elif key == keyboard.Key.f5:  # gain up (1.25x)
+            mic.set_preamp_gain(mic.preamp_gain * 1.25)
+            _print_gain()
+        elif key == keyboard.Key.f4:  # gain down (÷1.25)
+            mic.set_preamp_gain(mic.preamp_gain / 1.25)
+            _print_gain()
         elif key in (keyboard.Key.f8, keyboard.Key.esc):
             state.running = False
             return False
@@ -143,11 +152,13 @@ def main():
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
 
-    console.print("[bold cyan]ASR running[/bold cyan] — F9: toggle listen, F10: hold-to-talk, F8/Esc: quit.")
+    console.print("[bold cyan]ASR running[/bold cyan] — F9: toggle listen, F10: hold-to-talk, F4/F5: gain, F8/Esc: quit.")
     if state.copy_clip:
         console.print("Clipboard: [green]ON[/green]")
     if args.jsonl:
         console.print(f"Logging JSONL → {args.jsonl}")
+    if args.gain_db:
+        _print_gain()
 
     try:
         while state.running:
@@ -169,7 +180,6 @@ def main():
         mic.stop()
         listener.stop()
         console.print("[red]ASR stopped.[/red]")
-
 
 if __name__ == "__main__":
     main()
