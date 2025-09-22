@@ -1,4 +1,3 @@
-# src/cli.py
 import argparse
 import sys
 import sounddevice as sd
