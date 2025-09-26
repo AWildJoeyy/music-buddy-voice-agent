@@ -13,8 +13,6 @@ from .sinks import ConsoleSink, ClipboardSink, JSONLSink, CompositeSink, Transcr
 
 console = Console()
 
-# ---------- Event Bus ----------
-
 ASR_PARTIAL = "ASR_PARTIAL"      
 ASR_ENDPOINTED = "ASR_ENDPOINTED" 
 ASR_FINAL = "ASR_FINAL"            
@@ -31,8 +29,6 @@ class EventBus:
             try: fn(kind, payload)
             except Exception: pass
 
-# ---------- Internal state ----------
-
 @dataclass
 class AppState:
     running: bool = True
@@ -44,8 +40,6 @@ class AppState:
 
     def __post_init__(self):
         if self.ptt_buf is None: self.ptt_buf = []
-
-# ---------- Utilities ----------
 
 def build_sinks(jsonl_path: Optional[str], copy_clip: bool) -> CompositeSink:
     sinks = [ConsoleSink(printer=lambda s: console.print(f"[bold]{s}[/bold]"))]
@@ -61,9 +55,6 @@ def log_event(kind: str, payload: dict, path: Optional[str]) -> None:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass
-
-# ---------- Library entrypoint ----------
-
 class ASRApp:
     def __init__(self, args):
         self.args = args
@@ -107,7 +98,6 @@ class ASRApp:
             preamp_gain=self.preamp_gain,
         )  # :contentReference[oaicite:7]{index=7}
 
-    # ---- public API
     def subscribe(self, fn: Callable[[str, dict], None]): self.bus.subscribe(fn)
 
     def start(self):
@@ -123,7 +113,6 @@ class ASRApp:
         except Exception: pass
         console.print("[red]ASR stopped.[/red]")
 
-    # ---- internals
     def _print_gain(self):
         db = 20.0 * math.log10(self.mic.preamp_gain) if self.mic.preamp_gain > 0 else -120.0
         console.print(f"[yellow]Preamp:[/yellow] {db:.1f} dB  (x{self.mic.preamp_gain:.2f})")
@@ -140,12 +129,10 @@ class ASRApp:
             self.state.last_speech_active = speech_now
 
             if utter:
-                # End of utterance
                 uid = self.current_uid or str(uuid.uuid4())
                 self.bus.emit(ASR_ENDPOINTED, {"uid": uid})
                 log_event("asr_start", {"uid": uid, "frames": len(utter)}, self.args.jsonl)
                 self.q_utter.put((uid, self.t0_ms or int(time.time() * 1000), utter))
-                # reset tracking for next turn
                 self.current_uid, self.t0_ms = None, None
         else:
             # not listening, but let user flush current buffer on toggle
@@ -207,11 +194,10 @@ class ASRApp:
                     continue
 
                 t_decode0 = time.time()
-                text, lang, segs = self.backend.transcribe_with_segments(utter)  # segments + lang  :contentReference[oaicite:9]{index=9}
+                text, lang, segs = self.backend.transcribe_with_segments(utter) 
                 t_decode_ms = int((time.time() - t_decode0) * 1000)
 
-                # Final cleaning; partial cleaning would be lighter
-                text_clean = clean_text(text, normalize_punct=True, strip_fillers=False)  # :contentReference[oaicite:10]{index=10}
+                text_clean = clean_text(text, normalize_punct=True, strip_fillers=False)  
 
                 tN_ms = int(time.time() * 1000)
                 payload = {
@@ -232,10 +218,7 @@ class ASRApp:
         except KeyboardInterrupt:
             self.state.running = False
 
-# ---------- CLI ----------
-
 def run_asr(**overrides):
-    # Convenience for library callers
     ns = argparse.Namespace(**overrides)
     app = ASRApp(ns)
     return app
