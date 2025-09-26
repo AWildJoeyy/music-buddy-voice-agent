@@ -2,20 +2,17 @@ from __future__ import annotations
 import threading, queue, time, os, sys, traceback
 from typing import Optional
 
-# Optional deps
 try:
     import pyttsx3
 except Exception:
     pyttsx3 = None
 
-# Raw SAPI COM fallback (very robust on Windows)
 try:
     import pythoncom
     import win32com.client  # requires: pip install pypiwin32
 except Exception:
     pythoncom = None
     win32com = None  # type: ignore
-
 
 class TTSManager:
     """
@@ -45,8 +42,6 @@ class TTSManager:
         self._lock = threading.Lock()
         self._t = threading.Thread(target=self._worker, daemon=True)
         self._t.start()
-
-    # ---------------- backends ---------------- #
 
     def _init_pyttsx3(self):
         if pyttsx3 is None:
@@ -141,8 +136,6 @@ class TTSManager:
     def last_end_time(self) -> float:
         return self._last_end_ts
 
-    # ---------------- worker ---------------- #
-
     def _speak_pyttsx3(self, text: str):
         self._engine.say(text)     # type: ignore[attr-defined]
         self._engine.runAndWait()  # type: ignore[attr-defined]
@@ -152,7 +145,7 @@ class TTSManager:
         self._engine.Speak(text, 0)  # type: ignore[attr-defined]
 
     def _worker(self):
-        # Engine is created lazily here (so COM init lives in this thread if using SAPI)
+        # Engine is created lazily here
         while not self._stop.is_set():
             try:
                 text, _prio = self._q.get(timeout=0.1)
@@ -181,7 +174,6 @@ class TTSManager:
                 # Hard reset engine
                 with self._lock:
                     self._engine = None
-                # Flip backend after 2 consecutive failures
                 if self._fail_count >= 2:
                     self._backend_pref = "sapi" if self._backend == "pyttsx3" else "pyttsx3"
                     print(f"[tts] switching backend to {self._backend_pref}", flush=True)

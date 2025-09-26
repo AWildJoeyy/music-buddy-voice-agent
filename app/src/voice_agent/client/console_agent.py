@@ -1,4 +1,3 @@
-# src/voice_agent/client/console_agent.py
 from __future__ import annotations
 
 import atexit
@@ -32,9 +31,6 @@ def env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
-
-# ----------------------------- singleton lock ----------------------------- #
-
 class SingleInstance:
     """Prevent multiple console agents via a temp-file lock."""
     def __init__(self, name: str = "voice_agent_console.lock"):
@@ -62,9 +58,6 @@ class SingleInstance:
                     pass
         except Exception:
             pass
-
-
-# ----------------------------- agent runtime ----------------------------- #
 
 class ConsoleAgent:
     def __init__(self) -> None:
@@ -100,7 +93,6 @@ class ConsoleAgent:
         self._duck_asr = os.getenv("AGENT_IGNORE_ASR_WHILE_TTS", "1").lower() in ("1", "true", "yes")
         self._duck_cooldown_ms = env_int("AGENT_TTS_COOLDOWN_MS", 300)
 
-    # ------------------------- ASR management ------------------------- #
 
     def _asr_cmd(self) -> List[str]:
         dev = os.getenv("VA_ASR_DEVICE", "5")
@@ -208,8 +200,6 @@ class ConsoleAgent:
                 time.sleep(0.2)
                 self.stop()
 
-    # ---------------------------- LLM worker ---------------------------- #
-
     def _llm_worker(self) -> None:
         while not self._stop.is_set():
             try:
@@ -232,8 +222,6 @@ class ConsoleAgent:
                 print(f"[llm] error: {e}", file=sys.stderr)
             finally:
                 self.user_q.task_done()
-
-    # ---------------------------- Lifecycle ----------------------------- #
 
     def run(self) -> None:
         _ = SingleInstance()
@@ -292,9 +280,6 @@ class ConsoleAgent:
             pass
 
         print("[info] Agent stopped.", flush=True)
-
-
-# ------------------------------- Entrypoint ------------------------------- #
 
 def main() -> None:
     agent = ConsoleAgent()
