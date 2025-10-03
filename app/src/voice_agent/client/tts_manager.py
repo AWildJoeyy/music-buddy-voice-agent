@@ -9,7 +9,7 @@ except Exception:
 
 try:
     import pythoncom
-    import win32com.client  # requires: pip install pypiwin32
+    import win32com.client  
 except Exception:
     pythoncom = None
     win32com = None  # type: ignore
@@ -34,10 +34,9 @@ class TTSManager:
         self._voice_id = voice_id
         self._rate = int(rate)
         self._volume = float(volume)
-        # prefer SAPI unless user forces pyttsx3
         self._backend_pref = (backend or os.getenv("TTS_BACKEND", "sapi")).lower()
-        self._backend = None  # 'sapi' | 'pyttsx3'
-        self._engine = None   # win32com.client.Dispatch or pyttsx3.Engine
+        self._backend = None  
+        self._engine = None  
 
         self._lock = threading.Lock()
         self._t = threading.Thread(target=self._worker, daemon=True)
@@ -61,10 +60,8 @@ class TTSManager:
     def _init_sapi(self):
         if pythoncom is None or win32com is None:
             raise RuntimeError("pywin32 not installed")
-        # COM must be initialized in the *thread that uses it*.
         pythoncom.CoInitialize()
         voice = win32com.client.Dispatch("SAPI.SpVoice")
-        # Set voice (best-effort)
         if self._voice_id:
             try:
                 for v in voice.GetVoices():
@@ -73,7 +70,6 @@ class TTSManager:
                         break
             except Exception:
                 pass
-        # Rate: SAPI uses -10..+10. Map ~170..210 words/min to that range loosely.
         try:
             voice.Rate = max(-10, min(10, int((self._rate - 170) / 10)))
         except Exception:
@@ -103,7 +99,6 @@ class TTSManager:
                     last_err = e
             raise RuntimeError(f"TTS init failed: {last_err}")
 
-    # ---------------- public API ---------------- #
 
     def speak(self, text: str, high_priority: bool = False):
         if not text:
@@ -111,7 +106,6 @@ class TTSManager:
         try:
             item = (text, bool(high_priority))
             if high_priority:
-                # crude priority: put at front by rebuilding queue
                 with self._q.mutex:
                     items = list(self._q.queue)
                     self._q.queue.clear()
@@ -137,13 +131,11 @@ class TTSManager:
         return self._last_end_ts
 
     def _speak_pyttsx3(self, text: str):
-        self._engine.say(text)     # type: ignore[attr-defined]
-        self._engine.runAndWait()  # type: ignore[attr-defined]
+        self._engine.say(text)    
+        self._engine.runAndWait() 
 
     def _speak_sapi(self, text: str):
-        # 0 = SVSFlagsAsync off (sync speak)
-        self._engine.Speak(text, 0)  # type: ignore[attr-defined]
-
+        self._engine.Speak(text, 0)  
     def _worker(self):
         # Engine is created lazily here
         while not self._stop.is_set():
@@ -178,7 +170,6 @@ class TTSManager:
                     self._backend_pref = "sapi" if self._backend == "pyttsx3" else "pyttsx3"
                     print(f"[tts] switching backend to {self._backend_pref}", flush=True)
                     self._fail_count = 0
-                # Requeue the text once so it isn't lost
                 try:
                     self._q.put_nowait((text, False))
                 except Exception:
