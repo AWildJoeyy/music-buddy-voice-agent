@@ -13,6 +13,12 @@ from pathlib import Path
 from tempfile import gettempdir
 from typing import List, Dict, Optional
 
+# ---------- Optional Windows hotkey support ----------
+try:
+    import msvcrt  # Windows consoles for F9 toggle
+except ImportError:
+    msvcrt = None
+
 # ---- LLM backend (your file is at src/voice_agent/llm_hf_local.py) ----
 try:
     from voice_agent.llm_hf_local import complete as hf_complete, preload as hf_preload
@@ -22,6 +28,21 @@ except Exception:
 
 # ---- TTS (persistent) ----
 from voice_agent.client.tts_manager import TTSManager
+
+# ---- Analyze code skill ----
+from voice_agent.skills.analyze_code import handle_analyze_snippet
+
+
+BANNER = """\
+Console Agent
+-------------
+F9: Toggle Type-to-Talk mode
+Type mode commands:
+  /analyze   Paste a code snippet (end with a line: EOF) to get a report
+  /quit      Exit
+
+Push-to-talk (ASR) still runs in the background. Press Ctrl+C to exit.
+"""
 
 
 def env_int(name: str, default: int) -> int:
@@ -71,7 +92,7 @@ def _strip_fenced_blocks(md: str) -> str:
     even if the closing fence is at end-of-string without a trailing newline.
     """
     text = md
-    fence_rx = re.compile(r"(```|~~~)")  
+    fence_rx = re.compile(r"(```|~~~)")
     while True:
         m1 = fence_rx.search(text)
         if not m1:
@@ -177,6 +198,11 @@ class ConsoleAgent:
         self._duck_asr = os.getenv("AGENT_IGNORE_ASR_WHILE_TTS", "1").lower() in ("1", "true", "yes")
         self._duck_cooldown_ms = env_int("AGENT_TTS_COOLDOWN_MS", 300)
 
+        # ---- New: Type-to-Talk mode & hotkey queue ----
+        self.type_mode: bool = False
+        self._hotkey_q: "queue.Queue[str]" = queue.Queue()
+
+    # ---------- Paths & ASR ----------
     def _project_root(self) -> Path:
         return Path(__file__).resolve().parents[3]
 
@@ -226,7 +252,7 @@ class ConsoleAgent:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            cwd=str(self._project_root()),  
+            cwd=str(self._project_root()),
             env=env,
         )
         threading.Thread(target=self._asr_reader_loop, daemon=True).start()
@@ -278,32 +304,95 @@ class ConsoleAgent:
                 time.sleep(0.2)
                 self.stop()
 
+    # ---------- LLM ----------
+    def _respond(self, user_text: str) -> None:
+        """Common handler for both typed and ASR-sourced text."""
+        try:
+            self.history.append({"role": "user", "content": user_text})
+            if len(self.history) > (2 * self.max_history + 1):
+                self.history = [self.history[0]] + self.history[-2*self.max_history:]
+
+            reply = hf_complete(self.history) or "(no response)"
+            self.history.append({"role": "assistant", "content": reply})
+
+            # Print full Markdown to console
+            print(f"> LLM response: {reply}", flush=True)
+
+            # Send prose-only to TTS (strip code + links)
+            tts_text = prose_from_markdown(reply)
+            if tts_text:
+                self.tts.speak(tts_text)
+        except Exception as e:
+            print(f"[llm] error: {e}", file=sys.stderr)
+
     def _llm_worker(self) -> None:
+        """Background worker for ASR-sourced text."""
         while not self._stop.is_set():
             try:
                 user_text = self.user_q.get(timeout=0.1)
             except queue.Empty:
                 continue
             try:
-                self.history.append({"role": "user", "content": user_text})
-                if len(self.history) > (2 * self.max_history + 1):
-                    self.history = [self.history[0]] + self.history[-2*self.max_history:]
-
-                reply = hf_complete(self.history) or "(no response)"
-                self.history.append({"role": "assistant", "content": reply})
-
-                # Print full Markdown to console
-                print(f"> LLM response: {reply}", flush=True)
-
-                # Send prose-only to TTS (strip code + links)
-                tts_text = prose_from_markdown(reply)
-                if tts_text:
-                    self.tts.speak(tts_text)
-            except Exception as e:
-                print(f"[llm] error: {e}", file=sys.stderr)
+                self._respond(user_text)
             finally:
                 self.user_q.task_done()
 
+    # ---------- New: Hotkey watcher & type-mode ----------
+    def _hotkey_watcher(self) -> None:
+        """Watch F9 and push events into a queue (Windows consoles)."""
+        if not msvcrt:
+            return
+        while not self._stop.is_set():
+            try:
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch in ('\x00', '\xe0'):
+                        code = msvcrt.getwch()
+                        # On many Windows consoles, F9 emits '\x00' then '\x43'
+                        if code in ('\x43',):
+                            self._hotkey_q.put("F9")
+                time.sleep(0.01)
+            except Exception:
+                time.sleep(0.05)
+
+    def _toggle_type_mode(self) -> None:
+        self.type_mode = not self.type_mode
+        state = "ON" if self.type_mode else "OFF"
+        print(f"\n[Mode] Type-to-Talk is {state}.", flush=True)
+        if self.type_mode:
+            print("Tip: Type `/analyze` to paste a code snippet (finish with a line `EOF`).", flush=True)
+            # If you want F9 to immediately launch Analyze:
+            # return self._run_analyze_flow()
+
+    def _run_analyze_flow(self) -> None:
+        """Prompt user to paste code, analyze it, speak TTS-safe summary."""
+        print("\nPaste your code below. End input with a single line: EOF", flush=True)
+        pasted_lines: List[str] = []
+        while True:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            if line.strip() == "EOF":
+                break
+            pasted_lines.append(line)
+        pasted = "".join(pasted_lines)
+
+        result = handle_analyze_snippet(
+            pasted,
+            filename=None,
+            goals=["review"],
+            mode="quick",
+            llm=None  # plug your local LLM callable here if desired
+        )
+
+        print("\n=== Analysis Report (Markdown) ===", flush=True)
+        print(result["markdown"], flush=True)
+        if self.tts:
+            print("\n[TTS] Speaking summary (code elided)…", flush=True)
+            self.tts.speak(result["tts_text"])
+        print("=== End Report ===\n", flush=True)
+
+    # ---------- Main loop ----------
     def run(self) -> None:
         _ = SingleInstance()
 
@@ -320,16 +409,57 @@ class ConsoleAgent:
         except Exception:
             pass
 
+        print(BANNER, flush=True)
+
+        # Start ASR + LLM worker
         self.start_asr()
         threading.Thread(target=self._llm_worker, daemon=True).start()
 
+        # Start hotkey watcher (non-blocking)
+        if msvcrt:
+            threading.Thread(target=self._hotkey_watcher, daemon=True).start()
+        else:
+            print("[hint] F9 hotkey requires Windows console (msvcrt).", flush=True)
+
         if not self._printed_ready:
-            print("[info] Agent ready. Hold F10 to talk (PTT-only). Press Ctrl+C to exit.", flush=True)
+            print("[info] Agent ready. Hold your push-to-talk key in the ASR app. Press F9 to type.", flush=True)
             self._printed_ready = True
 
         try:
             while not self._stop.is_set():
-                time.sleep(0.1)
+                # Handle hotkeys
+                try:
+                    hk = self._hotkey_q.get_nowait()
+                except queue.Empty:
+                    hk = None
+                if hk == "F9":
+                    self._toggle_type_mode()
+
+                # Typed interaction loop when type mode is ON
+                if self.type_mode:
+                    try:
+                        user = input("> ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        print("\n[Interrupted input]", flush=True)
+                        self.type_mode = False
+                        continue
+
+                    if not user:
+                        continue
+                    if user.lower() in ("/quit", "quit", "exit"):
+                        print("Bye.", flush=True)
+                        self.stop()
+                        break
+                    if user.lower().startswith("/analyze") or user.lower().startswith(":analyze"):
+                        self._run_analyze_flow()
+                        continue
+
+                    # Normal typed user message
+                    print(f"[You] {user}", flush=True)
+                    self._respond(user)
+
+                # Allow background threads to run
+                time.sleep(0.05)
         finally:
             self.stop()
 
