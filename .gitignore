@@ -49,3 +49,43 @@ huggingface/
 
 # --- Notebooks ---
 *.ipynb_checkpoints/
+
+# --- Node / JS (root + client app) ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tsbuildinfo
+
+# --- Client app (Vite + Electron) ---
+client/node_modules/
+client/dist/
+client/.vite/
+client/.cache/
+client/.eslintcache
+client/.parcel-cache/
+client/coverage/
+client/.nyc_output/
+
+# Electron build outputs (common names)
+client/out/
+client/build/
+client/release/
+client/release-builds/
+
+# Ignore transpiled JS/maps if generated from TS in electron/
+# (keep the .ts sources)
+client/electron/*.js
+client/electron/*.js.map
+
+# --- Env files (root + client) ---
+.env
+.env.*.local
+client/.env
+client/.env.*.local
+
+# --- OS trash ---
+$RECYCLE.BIN/
+.Trash-*/
+
