@@ -16,10 +16,10 @@ const events = {
 };
 
 contextBridge.exposeInMainWorld("e2e", {
+  // existing
   chat: (id: string, messages: {role:"user"|"assistant"|"system"; content:string}[], stream = true) =>
     send({ type: "chat", id, messages, stream }),
   stop: (id: string) => send({ type: "stop", id }),
-  analyze: (id: string, paths: string[]) => send({ type: "analyze", id, paths }),
   tts: (id: string, text: string) => send({ type: "tts", id, text }),
   asrStart: (fmt: "webm" | "wav" = "webm") => send({ type: "asr_start", fmt }),
   asrChunk: (data_b64: string) => send({ type: "asr_chunk", data_b64 }),
@@ -27,4 +27,9 @@ contextBridge.exposeInMainWorld("e2e", {
   pickFiles: () => ipcRenderer.invoke("ipc:pick"),
   onPython: events.subscribe,
   onHotkey: events.hotkeys,
+
+  // new music helpers (minimal)
+  pickAudio: () => ipcRenderer.invoke("ipc:pickAudio"),
+  musicAutoBucket: (paths: string[]) => send({ type: "music_auto_bucket", paths }),
+  playPlaylist: (playlist: string, shuffle = false) => send({ type: "music_play_playlist", playlist, shuffle }),
 });

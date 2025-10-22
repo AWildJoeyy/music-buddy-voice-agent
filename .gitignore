@@ -89,3 +89,4 @@ client/.env.*.local
 $RECYCLE.BIN/
 .Trash-*/
 
+src/playlists

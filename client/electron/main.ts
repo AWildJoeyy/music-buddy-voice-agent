@@ -1,110 +1,49 @@
-import { app, BrowserWindow, ipcMain, dialog, Menu, globalShortcut } from "electron";
-import path from "node:path";
-import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
-import fs from "node:fs";
+import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import path from "path";
 
 let win: BrowserWindow | null = null;
-let py: ChildProcessWithoutNullStreams | null = null;
 
-function attachPythonHandlers() {
-  if (!py || !win) return;
-  const sendToRenderer = (data: any) => win && win.webContents.send("ipc:python", data);
-
-  py.stdout.setEncoding("utf8");
-  py.stdout.on("data", (chunk) => {
-    for (const line of String(chunk).split("\n")) {
-      const t = line.trim();
-      if (!t) continue;
-      try { sendToRenderer(JSON.parse(t)); }
-      catch { /* ignore bad lines */ }
-    }
-  });
-
-  py.stderr.setEncoding("utf8");
-  py.stderr.on("data", (chunk) => {
-    sendToRenderer({ type: "stderr", data: String(chunk) });
-  });
-
-  py.on("exit", (code) => {
-    sendToRenderer({ type: "stderr", data: `python exited (${code})` });
-  });
-}
-
-function startPython() {
-  const appSrc = path.join(process.cwd(), "..", "app", "src");
-  const env = {
-    ...process.env,
-    PYTHONPATH: [appSrc, process.env.PYTHONPATH || ""].filter(Boolean).join(path.delimiter),
-  };
-  py = spawn("python", ["-m", "voice_agent.ipc_worker"], {
-    cwd: appSrc,
-    env,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  attachPythonHandlers();
-}
-
-async function createWindow() {
+function createWindow() {
   win = new BrowserWindow({
-    width: 1120,
-    height: 760,
-    backgroundColor: "#0a0a0a",
-    title: "E2E Agent (IPC)",
+    width: 1100,
+    height: 800,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
     },
   });
-
-  if (process.env.VITE_DEV) {
-    await win.loadURL("http://localhost:5173");
-    win.webContents.openDevTools({ mode: "detach" });
-  } else {
-    const distIndex = path.join(__dirname, "../dist/index.html");
-    if (fs.existsSync(distIndex)) {
-      await win.loadURL(new URL(`file://${distIndex}`).toString());
-    } else {
-      await win.loadURL("http://localhost:5173");
-      win.webContents.openDevTools({ mode: "detach" });
-    }
-  }
-
-  // Global shortcut: F9 toggles push-to-talk
-  app.whenReady().then(() => {
-    globalShortcut.register("F9", () => {
-      if (win && !win.isDestroyed()) {
-        win.webContents.send("ipc:hotkey", { type: "ptt-toggle" });
-      }
-    });
-  });
-
-  win.on("closed", () => {
-    globalShortcut.unregisterAll();
-    win = null;
-    if (py) { py.kill(); py = null; }
-  });
+  if (process.env.VITE_DEV_SERVER_URL) win.loadURL(process.env.VITE_DEV_SERVER_URL);
+  else win.loadFile(path.join(__dirname, "../dist/index.html"));
+  win.on("closed", () => (win = null));
 }
 
-ipcMain.handle("ipc:send", async (_event, payload) => {
-  if (!py) return;
-  py.stdin.write(JSON.stringify(payload) + "\n");
-});
+app.whenReady().then(createWindow);
+app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 
-ipcMain.handle("ipc:pick", async () => {
+ipcMain.handle("pickFiles", async () => {
+  const res = await dialog.showOpenDialog(win!, { properties: ["openFile", "multiSelections"] });
+  return res.canceled ? [] : res.filePaths;
+});
+ipcMain.handle("ipc:pickAudio", async () => {
   if (!win) return [];
   const res = await dialog.showOpenDialog(win, {
-    properties: ["openFile", "openDirectory", "multiSelections"],
+    title: "Select audio files",
+    properties: ["openFile", "multiSelections"],
+    filters: [{ name: "Audio", extensions: ["mp3", "wav", "flac", "m4a"] }],
   });
   return res.canceled ? [] : res.filePaths;
 });
 
-app.whenReady().then(() => {
-  createWindow();
-  startPython();
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
-});
 
-app.on("will-quit", () => {
-  globalShortcut.unregisterAll();
-});
+// Chat/ASR/TTS handlers -> forward to your existing backend as before
+ipcMain.handle("chat", (_e, payload) => win!.webContents.send("python", payload)); // adapt if you proxy differently
+ipcMain.handle("stop", (_e, payload) => win!.webContents.send("python", payload));
+ipcMain.handle("tts", (_e, payload) => win!.webContents.send("python", payload));
+ipcMain.handle("asrStart", (_e, payload) => win!.webContents.send("python", { type: "asr_start", ...payload }));
+ipcMain.handle("asrChunk", (_e, payload) => win!.webContents.send("python", { type: "asr_chunk", ...payload }));
+ipcMain.handle("asrEnd", () => win!.webContents.send("python", { type: "asr_end" }));
+
+// Generic pass-through to ipc_worker
+ipcMain.handle("pythonInvoke", (_e, payload) => { win!.webContents.send("python", payload); });

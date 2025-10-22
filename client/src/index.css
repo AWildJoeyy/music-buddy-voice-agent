@@ -1,5 +1,19 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-html, body, #root { height: 100%; }
+:root {
+  color-scheme: dark;
+}
+html, body, #root {
+  height: 100%;
+}
+body {
+  @apply bg-zinc-950 text-zinc-100 antialiased;
+}
+
+.md-body p { @apply leading-relaxed mb-3; }
+.md-body h1 { @apply text-2xl font-semibold mt-4 mb-2; }
+.md-body h2 { @apply text-xl font-semibold mt-3 mb-2; }
+.md-body ul { @apply list-disc pl-6 mb-3; }
+.md-body ol { @apply list-decimal pl-6 mb-3; }
+.md-body code { @apply bg-zinc-800 px-1 py-0.5 rounded; }
+.md-body pre { @apply bg-zinc-900 border border-zinc-800 rounded-xl p-3 overflow-auto mb-3; }

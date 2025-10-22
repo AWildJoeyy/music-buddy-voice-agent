@@ -10,7 +10,8 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "types": ["node"]
+    "types": ["node", "vite/client"]
   },
-  "include": ["src", "electron", "vite.config.ts"]
+  "include": ["src", "vite.config.mts"],
+  "exclude": ["electron", "dist", "node_modules"]
 }
