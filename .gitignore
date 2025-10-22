@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+.mypy_cache/
+.pytest_cache/
+.coverage
 
 # --- Build artifacts ---
 build/
@@ -38,6 +41,7 @@ runs/
 *.jsonl
 tmp/
 temp/
+*.tmp
 
 # --- Data & models (optional; un-ignore if you commit samples) ---
 data/**/*.wav
@@ -46,6 +50,8 @@ data/**/*.m4a
 models/
 .cache/
 huggingface/
+whisper_cache/
+onnx_models/
 
 # --- Notebooks ---
 *.ipynb_checkpoints/
@@ -74,7 +80,6 @@ client/build/
 client/release/
 client/release-builds/
 
-# Ignore transpiled JS/maps if generated from TS in electron/
 # (keep the .ts sources)
 client/electron/*.js
 client/electron/*.js.map
@@ -89,4 +94,18 @@ client/.env.*.local
 $RECYCLE.BIN/
 .Trash-*/
 
-src/playlists
+# --- Project media & runtime artifacts ---
+src/playlists/
+app/src/playlists/
+client/src/playlists/
+
+# SQLite
+*.sqlite
+*.sqlite3
+**/music.sqlite3
+
+# Lockfiles 
+package-lock.json
+client/package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
