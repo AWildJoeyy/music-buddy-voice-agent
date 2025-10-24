@@ -70,13 +70,11 @@ def _import_llm():
             if m.get("role") == "user":
                 last = (m.get("content") or "").lower()
                 break
-
         def pick_playlist(s: str) -> str:
             m = re.search(r"play (?:from (?:my|the) )?([\w\- ]+)\s+playlist", s)
             m2 = re.search(r"\bplay\s+([\w\- ]+)\b", s)
             raw = (m.group(1) if m else (m2.group(1) if m2 else "")).strip()
             return re.sub(r"^(my|the)\s+", "", raw, flags=re.I).strip()
-
         pl = pick_playlist(last)
         if pl: return f"Okay — play_playlist('{pl}')."
         if "pause" in last: return "Pausing now."
@@ -93,17 +91,13 @@ class ChatCore:
         except Exception as e:_send({"type":"stderr","data":f"LLM preload: {e}"})
         self._stop=False
         self.delay=float(os.getenv("AGENT_TOKEN_DELAY","0.0"))
-        self.timeout_s=float(os.getenv("AGENT_COMPLETE_TIMEOUT","8"))  # faster fail
-
-    # rest of ChatCore unchanged (busy semaphore & streaming helpers as in your latest)
-
+        self.timeout_s=float(os.getenv("AGENT_COMPLETE_TIMEOUT","8"))
 
     def stop(self): self._stop=True
 
     def _tok(self,text:str):
-        if self.delay<=0:  # fast path
-            yield text+" "
-            return
+        if self.delay<=0:
+            yield text+" "; return
         for t in text.split(" "):
             if self._stop: break
             time.sleep(self.delay)
@@ -111,9 +105,7 @@ class ChatCore:
 
     def _complete_with_timeout(self, msgs: List[Dict[str,Any]]) -> str:
         got = _LLM_SEM.acquire(timeout=float(os.getenv("AGENT_BUSY_WAIT","0.05")))
-        if not got:
-            _dbg("LLM busy — fast fallback")
-            return "I’m on it. Meanwhile you can say play_playlist('upbeat') or 'slow'."
+        if not got: return "I’m on it. Meanwhile you can say play_playlist('upbeat') or 'slow'."
         res={"text":None,"err":None}
         def work():
             try: res["text"]=_llm_complete(msgs)
@@ -124,12 +116,10 @@ class ChatCore:
         th=threading.Thread(target=work, daemon=True); th.start()
         th.join(self.timeout_s)
         if th.is_alive():
-            _dbg("LLM timeout — using fallback string")
             try:_LLM_SEM.release()
             except: ...
             return "Sorry — my brain is slow right now. Say play_playlist('upbeat') to start some energy."
         if res["err"] is not None:
-            _dbg(f"LLM error: {res['err']}")
             return "I hit an error, but I can still manage the player — try play_playlist('upbeat') or 'slow'."
         return res["text"] or "(empty)"
 
@@ -233,20 +223,17 @@ def _start_status_thread():
                     _last_track = cur
                     _last_duration_ms = 0
                     _send({"type":"music_now_playing","current":cur,"name":Path(cur).name})
-
                 dur = st.get("duration_ms") or st.get("duration") or 0
                 if not dur and cur:
                     if not _last_duration_ms:
                         _last_duration_ms = _probe_duration_ms(cur)
                     dur = _last_duration_ms
                     if dur: st["duration_ms"] = dur
-
                 pos = st.get("position_ms") or st.get("position") or 0
                 if not pos:
                     pos = max(0, int((time.time() - _play_started_at) * 1000) - _accum_pause_ms)
                     if dur: pos = min(pos, int(dur))
                     st["position_ms"] = pos
-
                 if cur: st["current"] = cur
                 st["tick"]=True
                 _send({"type":"music_status","status":st})
@@ -347,7 +334,6 @@ def _player_play_playlist(name: str, shuffle: bool = False) -> Dict[str, Any]:
     if _last_play_req["name"] == name and (now - _last_play_req["ts"]) < 1.5:
         _dbg("debounce duplicate play request"); return {"status":"busy"}
     _last_play_req = {"name": name, "ts": now}
-
     _dbg(f"play_playlist requested: name={name!r} shuffle={shuffle}")
     _player_init()
     if not PLAYER: _dbg("unavailable: PLAYER is falsy"); return {"status":"unavailable"}
@@ -458,61 +444,172 @@ def _tts_speak_async(text:str):
     threading.Thread(target=run, daemon=True).start()
 
 def tts_b64(text:str):
-    # fire-and-forget to keep GIL free
     try: _tts_speak_async(text or "")
     except Exception as e: _send({"type":"stderr","data":f"TTS async error: {e}"})
     silent=(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
     return "audio/wav", base64.b64encode(silent).decode("ascii")
 
-_whisper=None; _asr_err=None; _asr_fp=None; _asr_tmp:Optional[Path]=None
+# --- ASR (robust, console-like) ---
+import subprocess, tempfile, base64, os, sys
+from pathlib import Path
+
+def _asr_errmsg(e: Exception | str) -> None:
+    _send({"type": "asr_error", "error": str(e)})
+
+_whisper = None
+_asr_err = None
+_asr_fp = None
+_asr_tmp: Path | None = None
+
+DEMO_REQUIRE_ASR_FIRST = os.getenv("DEMO_REQUIRE_ASR_FIRST","1").lower() in ("1","true","yes")
+DEMO_DISABLE_ASR_AFTER_FIRST = os.getenv("DEMO_DISABLE_ASR_AFTER_FIRST","1").lower() in ("1","true","yes")
+_asr_first_done = False
+_asr_disabled = False
+
 def _asr_init():
-    global _whisper,_asr_err
-    if _whisper or _asr_err: return
+    """Load any whisper backend we can find."""
+    global _whisper, _asr_err
+    if _whisper or _asr_err:  # already tried
+        return
     try:
-        from voice_agent.asr.backend_whisper import WhisperBackend
-        _whisper=WhisperBackend(
+        # preferred: our wrapper
+        try:
+            from voice_agent.asr.backend_whisper import WhisperBackend as WB  # type: ignore
+        except Exception:
+            from app.src.voice_agent.asr.backend_whisper import WhisperBackend as WB  # type: ignore
+        _whisper = WB(
             model_name=os.getenv("VA_ASR_MODEL","small.en"),
             device=os.getenv("VA_ASR_DEVICE_TYPE","auto"),
             compute_type=os.getenv("VA_ASR_COMPUTE_TYPE","auto"),
             language=os.getenv("VA_ASR_LANG","en"),
-            beam_size=_i("VA_ASR_BEAM_SIZE",5),
+            beam_size=int(os.getenv("VA_ASR_BEAM_SIZE","5")),
             vad_filter=os.getenv("VA_ASR_VAD","1").lower() in ("1","true","yes"),
         )
-    except Exception as e: _asr_err=f"ASR init failed: {e}"
-def asr_start(fmt="webm"):
-    global _asr_fp,_asr_tmp
-    _asr_init()
-    if _asr_fp:
-        try:_asr_fp.close()
-        except: ...
-    td=Path(tempfile.mkdtemp(prefix="va_asr_"))
-    _asr_tmp=td/f"rec.{fmt}"
-    _asr_fp=_asr_tmp.open("ab")
-    _send({"type":"asr_ready"})
-def asr_chunk(b64:str):
-    global _asr_fp
-    if _asr_fp: _asr_fp.write(base64.b64decode(b64))
-def _pcm16(src:Path)->bytes:
-    p=subprocess.run(["ffmpeg","-v","error","-i",str(src),"-ac","1","-ar","16000","-f","s16le","-"],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-    if p.returncode!=0: raise RuntimeError(p.stderr.decode("utf-8","ignore"))
-    return p.stdout
-def asr_end():
-    global _asr_fp,_asr_tmp,_whisper,_asr_err
-    if _asr_fp:
-        try:_asr_fp.close()
-        except: ...
-        _asr_fp=None
-    if not(_asr_tmp and _asr_tmp.exists()): _send({"type":"stderr","data":"ASR: no audio"}); return
-    if _whisper is None: _asr_init()
-    if _whisper is None: _send({"type":"stderr","data":_asr_err or "ASR unavailable"}); return
-    try:
-        pcm=_pcm16(_asr_tmp); 
-        text=_whisper.transcribe(pcm) or ""
-        _send({"type":"asr_final","text":text})
-    except Exception as e: _send({"type":"stderr","data":f"ASR failed: {e}"})
+        return
+    except Exception as e:
+        _asr_err = f"WhisperBackend import failed: {e}"
 
-AUDIO={".mp3",".wav",".flac",".m4a"}
-def _pl(name:str)->Path: p=PLAYLISTS/name; p.mkdir(parents=True,exist_ok=True); return p
+    # fallback: raw faster-whisper
+    try:
+        from faster_whisper import WhisperModel  # type: ignore
+        class _FW:
+            def __init__(self):
+                self.m = WhisperModel(
+                    os.getenv("VA_ASR_MODEL","small.en"),
+                    device=os.getenv("VA_ASR_DEVICE_TYPE","auto"),
+                    compute_type=os.getenv("VA_ASR_COMPUTE_TYPE","auto"),
+                )
+                self.lang = os.getenv("VA_ASR_LANG","en")
+            # accept raw PCM16 bytes
+            def transcribe_bytes(self, pcm_bytes: bytes) -> str:
+                # write to a temp wav via ffmpeg for simplicity
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    wav_path = f.name
+                try:
+                    p = subprocess.run(
+                        ["ffmpeg","-v","error","-f","s16le","-ac","1","-ar","16000","-i","-","-y",wav_path],
+                        input=pcm_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                    )
+                    if p.returncode != 0:
+                        raise RuntimeError(p.stderr.decode("utf-8","ignore") or "ffmpeg pcm->wav failed")
+                    segments, _ = self.m.transcribe(wav_path, language=self.lang)
+                    return " ".join(s.text.strip() for s in segments if getattr(s, "text", "").strip())
+                finally:
+                    try: os.unlink(wav_path)
+                    except Exception: pass
+        _whisper = _FW()
+        _asr_err = None
+    except Exception as e:
+        _asr_err = f"faster-whisper fallback failed: {e}"
+
+def _pcm16_from_any(src: Path) -> bytes:
+    """Decode webm/wav/m4a/etc to 16kHz mono PCM16."""
+    p = subprocess.run(
+        ["ffmpeg","-v","error","-i",str(src),"-ac","1","-ar","16000","-f","s16le","-"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    if p.returncode != 0:
+        raise RuntimeError(p.stderr.decode("utf-8","ignore") or "ffmpeg decode failed")
+    return p.stdout
+
+def asr_start(fmt="webm"):
+    global _asr_fp, _asr_tmp
+    if _asr_disabled:
+        _send({"type":"asr_disabled"}); return
+    _asr_init()
+    if _asr_err:
+        _asr_errmsg(_asr_err); return
+    try:
+        td = Path(tempfile.mkdtemp(prefix="va_asr_"))
+        _asr_tmp = td / f"rec.{fmt or 'webm'}"
+        _asr_fp = _asr_tmp.open("ab")
+        _send({"type":"asr_ready"})
+    except Exception as e:
+        _asr_errmsg(e)
+
+def asr_chunk(data_b64: str):
+    global _asr_fp
+    if _asr_disabled or _asr_fp is None: return
+    try:
+        _asr_fp.write(base64.b64decode(data_b64))
+    except Exception as e:
+        _asr_errmsg(e)
+
+def asr_end():
+    global _asr_fp, _asr_tmp, _whisper, _asr_err, _asr_first_done, _asr_disabled
+    try:
+        if _asr_fp:
+            try: _asr_fp.close()
+            finally: _asr_fp = None
+        if not _asr_tmp or not _asr_tmp.exists():
+            _asr_errmsg("ASR: no audio captured"); return
+
+        if _whisper is None:
+            _asr_init()
+        if _asr_err:
+            _asr_errmsg(_asr_err); return
+        if _whisper is None:
+            _asr_errmsg("ASR backend unavailable"); return
+
+        pcm = _pcm16_from_any(_asr_tmp)
+
+        text = ""
+        # Try common method names
+        for name in ("transcribe_pcm","transcribe_bytes","transcribe","transcribe_file"):
+            fn = getattr(_whisper, name, None)
+            if not callable(fn): continue
+            try:
+                if name in ("transcribe_pcm","transcribe_bytes","transcribe"):
+                    text = fn(pcm)  # type: ignore
+                elif name == "transcribe_file":
+                    text = fn(str(_asr_tmp))  # type: ignore
+                if isinstance(text, tuple):
+                    # some wrappers return (text, meta)
+                    text = text[0]
+                text = (text or "").strip()
+            except Exception as e:
+                _asr_errmsg(f"ASR {name} error: {e}")
+                text = ""
+            if text:
+                break
+
+        if not text:
+            _asr_errmsg("ASR produced empty text")
+        else:
+            _send({"type":"asr_final","text":text})
+            _asr_first_done = True
+            if DEMO_DISABLE_ASR_AFTER_FIRST:
+                _asr_disabled = True
+                _send({"type":"asr_disabled"})
+
+    finally:
+        try:
+            if _asr_tmp and _asr_tmp.exists():
+                try: _asr_tmp.unlink()
+                except Exception: pass
+        finally:
+            _asr_tmp = None
+
 
 def _diag():
     return {
@@ -523,6 +620,9 @@ def _diag():
         "db": str(DB_PATH),
         "cwd": os.getcwd(),
         "py": sys.version.split()[0],
+        "asr_required": DEMO_REQUIRE_ASR_FIRST,
+        "asr_disabled": _asr_disabled,
+        "asr_first_done": _asr_first_done,
     }
 
 import queue
@@ -538,6 +638,10 @@ def _stdin_reader(q: "queue.Queue[dict]"):
                 except Exception as e: _send({"type":"stderr","data":f"bad json: {e}"})
         else: buf += ch
 
+def _music_allowed() -> bool:
+    if not DEMO_REQUIRE_ASR_FIRST: return True
+    return _asr_first_done
+
 def main():
     _db_init()
     q: "queue.Queue[Any]" = queue.Queue()
@@ -547,29 +651,56 @@ def main():
         req=q.get()
         if not isinstance(req,dict): continue
         t=req.get("type")
+
         if t=="chat":
             cid=req.get("id","chat"); msgs=req.get("messages",[])
             threading.Thread(target=chat.chat, args=(cid,msgs), daemon=True).start()
+
         elif t=="stop":
             chat.stop(); _send({"type":"stopped","id":req.get("id")})
+
         elif t=="tts":
             mime,b64 = tts_b64(req.get("text",""))
             _send({"type":"tts_result","id":req.get("id"),"mime":mime,"audio_b64":b64})
+
         elif t=="asr_start": asr_start(req.get("fmt","webm"))
         elif t=="asr_chunk": asr_chunk(req.get("data_b64",""))
         elif t=="asr_end": threading.Thread(target=asr_end, daemon=True).start()
-        elif t=="music_list_playlists": _send({"type":"music_playlists","items":list_playlists()})
-        elif t=="music_list_tracks": _send({"type":"music_tracks","playlist":req.get("playlist"),"items":list_tracks(req.get("playlist",""))})
-        elif t=="music_import_to_playlist": _send({"type":"music_imported","result":import_to_playlist(req.get("playlist","unsorted"), req.get("paths") or [], bool(req.get("copy",True)))})
-        elif t=="music_auto_bucket": _send({"type":"music_bucketed","result":auto_bucket(req.get("paths") or [], bool(req.get("copy",True)))})
+
+        elif t=="music_list_playlists":
+            if not _music_allowed(): _send({"type":"music_player","result":{"status":"blocked_demo_asr"}})
+            else: _send({"type":"music_playlists","items":list_playlists()})
+
+        elif t=="music_list_tracks":
+            if not _music_allowed(): _send({"type":"music_player","result":{"status":"blocked_demo_asr"}})
+            else: _send({"type":"music_tracks","playlist":req.get("playlist"),"items":list_tracks(req.get("playlist",""))})
+
+        elif t=="music_import_to_playlist":
+            if not _music_allowed(): _send({"type":"music_player","result":{"status":"blocked_demo_asr"}})
+            else: _send({"type":"music_imported","result":import_to_playlist(req.get("playlist","unsorted"), req.get("paths") or [], bool(req.get("copy",True)))})
+
+        elif t=="music_auto_bucket":
+            if not _music_allowed(): _send({"type":"music_player","result":{"status":"blocked_demo_asr"}})
+            else: _send({"type":"music_bucketed","result":auto_bucket(req.get("paths") or [], bool(req.get("copy",True)))})
+
         elif t=="music_play_playlist":
-            _dbg(f"IPC music_play_playlist payload={req}")
-            res=_player_play_playlist(req.get("playlist",""), bool(req.get("shuffle",False)))
-            _send({"type":"music_player","result":res})
+            if not _music_allowed():
+                _dbg("music blocked until first ASR message")
+                _send({"type":"music_player","result":{"status":"blocked_demo_asr"}})
+            else:
+                _dbg(f"IPC music_play_playlist payload={req}")
+                res=_player_play_playlist(req.get("playlist",""), bool(req.get("shuffle",False)))
+                _send({"type":"music_player","result":res})
+
         elif t=="music_ctrl":
-            _dbg(f"IPC music_ctrl payload={req}")
-            res=_player_ctrl(str(req.get("cmd","")))
-            _send({"type":"music_status","status":res})
+            if not _music_allowed():
+                _dbg("music ctrl blocked until first ASR message")
+                _send({"type":"music_status","status":{"status":"blocked_demo_asr"}})
+            else:
+                _dbg(f"IPC music_ctrl payload={req}")
+                res=_player_ctrl(str(req.get("cmd","")))
+                _send({"type":"music_status","status":res})
+
         elif t=="diag": _send({"type":"diag","status":_diag()})
         elif t=="quit": _send({"type":"bye"}); break
 

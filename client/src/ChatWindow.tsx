@@ -56,7 +56,7 @@ const fmt = (ms?: number) => {
   return `${m}:${s}`;
 };
 
-// sanitize playlist names: drop leading "my"/"the", trim extra spaces/punctuation
+// sanitize playlist names
 const cleanPlaylist = (raw: string) =>
   raw.replace(/^[\s'"]+|[\s'"]+$/g, "")
      .replace(/^(my|the)\s+/i, "")
@@ -76,21 +76,27 @@ export default function ChatWindow() {
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
 
-  // gates & queues
+  // TTS + action gating
   const ttsActiveRef = useRef(false);
   const actionQueueRef = useRef<any[]>([]);
   const spokenSetRef = useRef<Set<string>>(new Set());
 
-  // suppress duplicate plays: once UI triggers a play, ignore tool-plays until ack/timeout
+  // play de-dupe
   const playSuppressedRef = useRef(false);
   const playSuppressionTimerRef = useRef<number | null>(null);
 
-  const playPendingRef = useRef(false); // for TTS gating while waiting for play ack
+  const playPendingRef = useRef(false);
   const deferredSpeechRef = useRef<{ id: string; text: string } | null>(null);
 
   const nowPlayingRef = useRef<string | null>(null);
   const lastAssistantRef = useRef<{ id: string; content: string } | null>(null);
   const playLockRef = useRef(false);
+
+  // --- one-shot PTT state ---
+  const [recording, setRecording] = useState(false);
+  const [asrUsed, setAsrUsed] = useState(false); // disable PTT after first transcript
+  const mediaRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
     const ta = taRef.current; if (!ta) return;
@@ -126,28 +132,25 @@ export default function ChatWindow() {
     await speakBlocking(uid(), key);
   }, [speakBlocking]);
 
-  // central play trigger (used by user-intent + assistant tools)
+  // central play trigger
   const playPlaylist = (nameRaw: string) => {
     const name = cleanPlaylist(nameRaw);
     if (!name) return;
     if (playLockRef.current) return;
     playLockRef.current = true;
 
-    // start the suppression window to ignore assistant-triggered plays
     playSuppressedRef.current = true;
     if (playSuppressionTimerRef.current) window.clearTimeout(playSuppressionTimerRef.current);
     playSuppressionTimerRef.current = window.setTimeout(() => { playSuppressedRef.current = false; }, 4000);
 
-    // TTS should defer until play ack arrives
     playPendingRef.current = true;
-
     sendAction({ type: "music_play_playlist", playlist: name });
     window.setTimeout(() => { playLockRef.current = false; }, 1000);
   };
 
-  // extract tools from assistant text (guarded by suppression flag)
+  // tool extraction from assistant text
   const runToolFromText = (text: string): boolean => {
-    if (playSuppressedRef.current) return false; // UI already fired a play; ignore
+    if (playSuppressedRef.current) return false;
     const m = text.match(/play_playlist\(['"]([\w\- ]+)['"]\)/i);
     const m2 = text.match(/play (?:from (?:my|the) )?([\w\- ]+)\s+playlist/i);
     const m3 = text.match(/\bplay\s+([\w\- ]+)\b/i);
@@ -200,6 +203,7 @@ export default function ChatWindow() {
 
     if (t === "music_player") {
       const r = msg.result || {};
+      setPosMs(0); setDurMs(0); // reset bar on fresh play
       if (Number.isFinite(r.volume)) setVol(r.volume);
       if (Number.isFinite(r.position_ms)) setPosMs(r.position_ms);
       if (Number.isFinite(r.duration_ms)) setDurMs(r.duration_ms);
@@ -214,7 +218,6 @@ export default function ChatWindow() {
       const id = uid();
       setMessages((m) => [...m, { id, role: "assistant", content: line }]);
 
-      // Clear play suppression as soon as we get any player ack
       playSuppressedRef.current = false;
       if (playSuppressionTimerRef.current) { window.clearTimeout(playSuppressionTimerRef.current); playSuppressionTimerRef.current = null; }
 
@@ -234,6 +237,7 @@ export default function ChatWindow() {
     if (t === "music_now_playing") {
       const name = String(msg.name ?? "").trim();
       if (name) {
+        setPosMs(0); setDurMs(0); // reset bar on track change
         nowPlayingRef.current = msg.current || name;
         const line = `Now playing: ${name}`;
         const id = uid();
@@ -262,6 +266,7 @@ export default function ChatWindow() {
       if (Number.isFinite(s.position_ms)) setPosMs(s.position_ms);
       if (Number.isFinite(s.duration_ms)) setDurMs(s.duration_ms);
       if (typeof s.current === "string" && s.current !== nowPlayingRef.current) {
+        setPosMs(0); setDurMs(0); // reset when current changes
         nowPlayingRef.current = s.current;
         const line = `Now playing: ${s.current.split(/[\\/]/).pop()}`;
         const id = uid();
@@ -282,9 +287,21 @@ export default function ChatWindow() {
 
     if (t === "asr_final") {
       const text = (msg.text ?? "").trim();
-      if (text) sendChat(text);
+      if (text) {
+        // show it in the transcript
+        setMessages((m) => [...m, { id: uid(), role: "user", content: text }]);
+
+        const handled = tryDirectUserIntent(text);
+        if (!handled) {
+          const id = uid();
+          setStreaming(true);
+          window.e2e.send({ type: "chat", id, messages: [{ role: "user", content: text }] });
+        }
+      }
+      setAsrUsed(true);     
       return;
     }
+    if (t === "asr_disabled") { setAsrUsed(true); return; }
   }, [sendAction, speakBlocking]);
 
   useEffect(() => {
@@ -293,9 +310,9 @@ export default function ChatWindow() {
     return () => off();
   }, [handlePythonMessage]);
 
+  // direct user intent (skips LLM)
   const tryDirectUserIntent = (userText: string): boolean => {
     const text = userText.toLowerCase().trim();
-    // play from my X playlist / play X playlist / play X
     const m = text.match(/play (?:from (?:my|the) )?([\w\- ]+)\s+playlist/);
     const m2 = text.match(/^play\s+([\w\- ]+)$/);
     const clean = (s: string) => s.replace(/^(my|the)\s+/i, "").trim();
@@ -310,19 +327,14 @@ export default function ChatWindow() {
     return false;
   };
 
-
   const sendChat = (userText: string) => {
     const handledDirect = tryDirectUserIntent(userText);
-
     setMessages((m) => [...m, { id: uid(), role: "user", content: userText }]);
-
     if (handledDirect) return;
-
     const id = uid();
     setStreaming(true);
     window.e2e.send({ type: "chat", id, messages: [{ role: "user", content: userText }] });
   };
-
 
   const onUploadMp3 = async () => {
     const paths = (await window.e2e.pickAudio()) || [];
@@ -331,24 +343,42 @@ export default function ChatWindow() {
     window.e2e.send({ type: "music_auto_bucket", paths });
   };
 
-  const [recording, setRecording] = useState(false);
-  const mediaRef = useRef<MediaRecorder | null>(null);
-  const startRecording = async () => {
-    if (recording) return;
+  // --- one-shot PTT handlers ---
+  const startOneShotRecording = async () => {
+    if (recording || asrUsed) return;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    streamRef.current = stream;
     await window.e2e.asrStart("webm");
-    const mr = (mediaRef.current = new MediaRecorder(stream, { mimeType: "audio/webm" }));
+    const mr = new MediaRecorder(stream, { mimeType: "audio/webm" });
+    mediaRef.current = mr;
+
     mr.ondataavailable = async (e) => {
       if (!e.data || e.data.size === 0) return;
       const ab = await e.data.arrayBuffer();
       const b64 = arrayBufferToBase64(ab);
       await window.e2e.asrChunk(b64);
     };
-    mr.onstop = async () => { await window.e2e.asrEnd(); setRecording(false); };
+    mr.onstop = async () => {
+      await window.e2e.asrEnd();
+      stream.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+      setRecording(false);
+    };
+
     mr.start(250);
     setRecording(true);
   };
-  const stopRecording = async () => { if (recording) mediaRef.current?.stop(); };
+
+  const stopOneShotRecording = async () => {
+    if (!recording) return;
+    mediaRef.current?.stop();
+  };
+
+  const togglePTT = async () => {
+    if (asrUsed) return;          // one shot only
+    if (!recording) await startOneShotRecording();
+    else await stopOneShotRecording();
+  };
 
   const canSend = input.trim().length > 0 && !streaming;
 
@@ -393,20 +423,15 @@ export default function ChatWindow() {
 
       <div className="border-t border-zinc-800 p-3 space-y-3">
         <div className="max-w-5xl mx-auto flex items-end gap-2 flex-wrap">
-          <Button
-            onMouseDown={startRecording}
-            onMouseUp={stopRecording}
-            onTouchStart={startRecording}
-            onTouchEnd={stopRecording}
-            className={recording ? "bg-red-800" : ""}
-          >
-            {recording ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />} {recording ? "Listening…" : "Push-to-talk (F9)"}
+          <Button onClick={togglePTT} disabled={asrUsed} className={recording ? "bg-red-800" : ""}>
+            {recording ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+            {asrUsed ? "Push-to-talk (F9)" : recording ? "Recording… (click to stop)" : "Push-to-talk (F9)"}
           </Button>
 
           <div className="flex-1 min-w-[260px]">
             <Textarea
               ref={taRef}
-              placeholder={recording ? "Listening…" : "Message the bot"}
+              placeholder={"Message the bot"}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
